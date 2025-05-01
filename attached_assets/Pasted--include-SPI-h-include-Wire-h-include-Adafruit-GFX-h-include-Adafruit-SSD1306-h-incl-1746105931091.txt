@@ -1,0 +1,511 @@
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <FS.h> // SPIFFS für ESP8266 NodeMCU
+
+// Display-Breite und -Höhe für das OLED Display
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// Reset-Pin # (oder -1, falls Reset-Pin des Displays mit GND verbunden ist)
+#define OLED_RESET -1 // Dieser Pin wird nicht verwendet, da das Display einen externen Reset-Widerstand hat
+#define OLED_ADDR 0x3C ///< Standard-Adresse des Displays, falls nicht anders gejumpert
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Define Pins für LEDs
+#define RED_PIN 16 // D0
+#define GREEN_PIN 5 // D1
+#define BLUE_PIN 4 // D2
+
+// Define button pin
+#define BUTTON_PIN 0 // D3
+#define PLUS_BUTTON 2 // D4 - PLUS Button Input - **Neu hinzugefügt**
+#define MINUS_BUTTON 14 // D5 - MINUS Button Input - **Neu hinzugefügt**
+
+// Define Motor Pin
+#define MOTOR_PIN 12 // D6
+
+// Define Sensor Pin
+#define SENSOR_PIN 13 // D7
+
+// Variablen für LED-Steuerung
+String ledMode = "normal";
+bool programActive = false;
+unsigned long startTime = 0;
+unsigned long programDuration = 0; // Programmdauer in Millisekunden - Standardwert erstmal
+String activeProgram = "---"; // Aktiver Programmname - für Anzeige und Steuerung
+String programName = "Programm 1"; // Standard Programmnamenbelegung
+unsigned long autoStartTimer = 0;
+const unsigned long autoStartTime = 30000; // 30 Sekunden für Auto-Start - **Neu als Konstante**
+bool autoStartActive = false; // Auto-Start Funktion aktiv Flag - **Neu**
+
+// Web Server Instanz
+ESP8266WebServer server(80);
+
+// Menü Status Variable - **Neu für Menü Navigation**
+enum MenuState {
+    MAIN_MENU,
+    PROGRAM_SELECT_MENU,
+    SETTINGS_MENU,
+    SETTINGS_DISPLAY_MENU,
+    SETTINGS_SYSTEM_MENU,
+    SETUP_NEW_DAYS_ADJUST, // Menüpunkt zum Anpassen der Tage - **Neu**
+    ADJUSTING_DAYS // Zustand während der Tage-Anpassung - **Neu**
+} currentMenuState = MAIN_MENU;
+String menuTitle = "Hauptmenü"; // Menü Titel Variable - **Neu**
+int customDays = 30; // Variable für benutzerdefinierte Tage - **Neu**
+
+// Array für Programmnamen - **Neu für Programmauswahl**
+String programNames[] = {"Programm 1", "Programm 2", "Programm 3", "Programm 4"};
+int programIndex = 0; // Index für Programmauswahl - **Neu**
+
+// Struktur für Display-Zustände - **Vereinfacht und erweitert**
+enum DisplayState {
+    NORMAL,
+    PROGRAM_ACTIVE,
+    PROGRAM_COMPLETED, // Neu: Programm abgeschlossen Zustand
+    ERROR_TANK_LOW,
+    MENU_MODE, // Menü-Modus hinzugefügt
+    DEFAULT // Default Zustand für unbekannte Fälle
+} displayState = NORMAL;
+
+
+void setLED(String mode) {
+    ledMode = mode;
+    if (ledMode == "normal") {
+        digitalWrite(RED_PIN, LOW);
+        digitalWrite(GREEN_PIN, HIGH);
+        digitalWrite(BLUE_PIN, LOW);
+    } else if (ledMode == "program_active") {
+        digitalWrite(RED_PIN, LOW);
+        digitalWrite(GREEN_PIN, LOW);
+        digitalWrite(BLUE_PIN, HIGH);
+    } else if (ledMode == "error") {
+        digitalWrite(RED_PIN, HIGH);
+        digitalWrite(GREEN_PIN, LOW);
+        digitalWrite(BLUE_PIN, LOW);
+    } else if (ledMode == "menu_mode") { // Menü Modus LED Farbe - **Neu**
+        digitalWrite(RED_PIN, HIGH);
+        digitalWrite(GREEN_PIN, HIGH);
+        digitalWrite(BLUE_PIN, LOW);
+    }
+}
+
+void updateDisplay() {
+    display.clearDisplay();
+    display.setTextColor(WHITE);
+
+    switch (displayState) {
+        case NORMAL: { // NORMAL - **Unverändert**
+            Serial.println("Zeichne NORMAL"); // **DEBUGGING - Case Name**
+            display.setTextSize(2);
+            display.setCursor(0, 0);
+            Serial.println("NORMAL - Text: Standby"); // **DEBUGGING - Textinhalt**
+            display.println(F("Standby"));
+            display.setTextSize(1);
+            display.setCursor(0, 20);
+            Serial.println("NORMAL - Text: Automatischer Start in:"); // **DEBUGGING - Textinhalt**
+            display.println(F("Automatischer Start in:"));
+            display.setTextSize(2);
+            display.setCursor(0, 30);
+            if (autoStartActive) { // Wenn Auto-Start aktiv, Countdown anzeigen - **Neu**
+                unsigned long timeLeft = (autoStartTime - (millis() - autoStartTimer)) / 1000; // Sekunden bis Auto-Start
+                if (timeLeft <= 0) {
+                    timeLeft = 0; // Verhindert negative Werte
+                    startProgram(programName); // Programm automatisch starten, falls Timer abgelaufen und Auto-Start aktiv
+                }
+                String countdown = String(timeLeft) + " Sek.";
+                Serial.println("NORMAL - Text: Countdown: " + countdown); // **DEBUGGING - Textinhalt**
+                display.println(countdown);
+            } else {
+                Serial.println("NORMAL - Text: Auto-Start inaktiv"); // **DEBUGGING - Textinhalt**
+                display.println(F("---")); // Oder "---" anzeigen, wenn Auto-Start inaktiv
+            }
+            break;
+        }
+        case PROGRAM_ACTIVE: { // PROGRAM_ACTIVE - **Unverändert**
+            Serial.println("Zeichne PROGRAM_ACTIVE"); // **DEBUGGING - Case Name**
+            display.setTextSize(1);
+            display.setCursor(0, 0);
+            Serial.println("PROGRAM_ACTIVE - Text: Programm aktiv:"); // **DEBUGGING - Textinhalt**
+            display.println(F("Programm aktiv:"));
+            display.setTextSize(2);
+            display.setCursor(0, 9);
+            Serial.println("PROGRAM_ACTIVE - Text: " + activeProgram); // **DEBUGGING - Textinhalt**
+            display.println(activeProgram);
+            display.setTextSize(1);
+            display.setCursor(0, 25);
+            unsigned long elapsedMillis = millis() - startTime;
+            unsigned long remainingMillis = programDuration - elapsedMillis;
+            if (remainingMillis <= 0) {
+                remainingMillis = 0;
+                stopProgram(); // Programm automatisch stoppen, falls Dauer abgelaufen
+            }
+            unsigned long remainingSeconds = remainingMillis / 1000;
+            unsigned long remainingMinutes = remainingSeconds / 60;
+            unsigned long remainingHours = remainingMinutes / 60;
+            remainingSeconds = remainingSeconds % 60;
+            remainingMinutes = remainingMinutes % 60;
+            String remainingTime = "";
+            if (programDuration > 0) { // Nur Zeit anzeigen, wenn Programmdauer > 0 (nicht für "Individuell")
+                remainingTime = String(remainingHours) + " Std. " + String(remainingMinutes) + " Min. " + String(remainingSeconds) + " Sek.";
+            } else {
+                remainingTime = "Individuell"; // Anzeige für unbegrenzte Programmdauer
+            }
+            Serial.println("PROGRAM_ACTIVE - Text: Verbleibende Zeit: " + remainingTime); // **DEBUGGING - Textinhalt**
+            display.println(F("Verbleibende Zeit:"));
+            display.setCursor(0, 35);
+            display.setTextSize(1); // Kleine Textgröße für die Zeit
+            display.println(remainingTime);
+            break;
+        }
+        case PROGRAM_COMPLETED: { // PROGRAM_COMPLETED - **Neu**
+            Serial.println("Zeichne PROGRAM_COMPLETED"); // **DEBUGGING - Case Name**
+            display.setTextSize(1);
+            Serial.println("PROGRAM_COMPLETED - Text: Abgeschlossen."); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 0);
+            display.println(F("Abgeschlossen."));
+            display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+            Serial.println("PROGRAM_COMPLETED - Text: Tank entfernen."); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 9); // Textposition angepasst
+            display.println(F("Tank entfernen."));
+            display.drawLine(0, 15, SCREEN_WIDTH - 1, 15, WHITE);
+            Serial.println("PROGRAM_COMPLETED - Text: Standby Aktiv."); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 17); // Textposition angepasst
+            display.println(F("Standby Aktiv."));
+            display.setCursor(0, 25); // Textposition angepasst, mehr Platz nach oben
+            break;
+        }
+        case ERROR_TANK_LOW: { // ERROR_TANK_LOW - **Unverändert**
+            Serial.println("Zeichne ERROR_TANK_LOW"); // **DEBUGGING - Case Name**
+            display.setTextSize(1);
+            Serial.println("ERROR_TANK_LOW - Text: Fehlermeldung"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 0);
+            display.println(F("Fehlermeldung"));
+            display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+            Serial.println("ERROR_TANK_LOW - Text: Fuellstand im"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 9); // Textposition angepasst
+            display.println(F("Fuellstand im"));
+            Serial.println("ERROR_TANK_LOW - Text: Tank zu gering!"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 17); // Textposition angepasst
+            display.println(F("Tank zu gering!"));
+            display.drawLine(0, 23, SCREEN_WIDTH - 1, 23, WHITE);
+            Serial.println("ERROR_TANK_LOW - Text: Neustarten fuer"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 25); // Textposition angepasst, mehr Platz nach oben
+            display.println(F("Neustarten fuer"));
+            Serial.println("ERROR_TANK_LOW - Text: Inbetriebnahme"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 33); // Textposition angepasst, noch mehr Platz
+            display.println(F("Inbetriebnahme"));
+            break;
+        }
+        case MENU_MODE: { // MENU_MODE - **Neu für Menü Anzeige**
+            Serial.println("Zeichne MENU_MODE"); // **DEBUGGING - Case Name**
+            display.setTextSize(2);
+            display.setCursor(0, 0);
+            Serial.println("MENU_MODE - Text: " + menuTitle); // **DEBUGGING - Textinhalt**
+            display.println(menuTitle); // Menütitel anzeigen
+            display.setTextSize(1);
+            display.setCursor(0, 20);
+
+            switch (currentMenuState) {
+                case MAIN_MENU:
+                    Serial.println("MENU_MODE - Text: -> Programme"); // **DEBUGGING - Textinhalt**
+                    display.println(F("-> Programme"));
+                    display.setCursor(0, 30);
+                    Serial.println("MENU_MODE - Text:    Einstellungen"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  Einstellungen"));
+                    display.setCursor(0, 40);
+                    Serial.println("MENU_MODE - Text:    System Info"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  System Info"));
+                    break;
+                case PROGRAM_SELECT_MENU:
+                    Serial.println("MENU_MODE - Text:  " + programNames[programIndex]); // **DEBUGGING - Textinhalt**
+                    display.println("-> " + programNames[programIndex]); // Aktuelles Programm hervorheben
+                    for (int i = 0; i < 4; i++) { // Alle Programme im Menü anzeigen
+                        if (i != programIndex) {
+                            display.setCursor(0, 30 + (i * 10)); // Position für jeden Programmnamen
+                            Serial.println("MENU_MODE - Text:    " + programNames[i]); // **DEBUGGING - Textinhalt**
+                            display.println("   " + programNames[i]); // Programme eingerückt darstellen
+                        }
+                    }
+                    break;
+                 case SETTINGS_MENU:
+                    Serial.println("MENU_MODE - Text: -> Display"); // **DEBUGGING - Textinhalt**
+                    display.println(F("-> Display"));
+                    display.setCursor(0, 30);
+                    Serial.println("MENU_MODE - Text:    System"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  System"));
+                    display.setCursor(0, 40);
+                    Serial.println("MENU_MODE - Text:    Zurueck"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  Zurueck")); // Zurück zum Hauptmenü Option
+                    break;
+                case SETTINGS_DISPLAY_MENU:
+                    Serial.println("MENU_MODE - Text: -> Helligkeit"); // **DEBUGGING - Textinhalt**
+                    display.println(F("-> Helligkeit"));
+                    display.setCursor(0, 30);
+                    display.println(F("   Kontrast"));
+                    display.setCursor(0, 40);
+                    Serial.println("MENU_MODE - Text:    Zurueck"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  Zurueck"));
+                    break;
+                 case SETTINGS_SYSTEM_MENU:
+                    Serial.println("MENU_MODE - Text: -> Auto-Start"); // **DEBUGGING - Textinhalt**
+                    display.println(F("-> Auto-Start"));
+                    display.setCursor(0, 30);
+                    Serial.println("MENU_MODE - Text:  Custom Days"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  Custom Days")); // Menüpunkt für Custom Days - **Neu**
+                    display.setCursor(0, 40);
+                    Serial.println("MENU_MODE - Text:    Zurueck"); // **DEBUGGING - Textinhalt**
+                    display.println(F("  Zurueck"));
+                    break;
+                 case SETUP_NEW_DAYS_ADJUST: // Anzeige zur Anpassung der Tage - **Neu**
+                    display.setTextSize(1);
+                    display.setCursor(0, 20);
+                    Serial.println("MENU_MODE - Text: Tage anpassen:"); // **DEBUGGING - Textinhalt**
+                    display.println(F("Tage anpassen:"));
+                    display.setTextSize(2);
+                    display.setCursor(0, 30);
+                    Serial.println("MENU_MODE - Text: " + String(customDays)); // **DEBUGGING - Textinhalt**
+                    display.println(String(customDays)); // Aktuelle Tage anzeigen
+                    display.setTextSize(1);
+                    display.setCursor(0, 50);
+                    Serial.println("MENU_MODE - Text: +/- zum Anpassen, OK zum Speichern"); // **DEBUGGING - Textinhalt**
+                    display.println(F("+/- zum Anpassen, OK zum Speichern"));
+                    break;
+                case ADJUSTING_DAYS: // Während der Anpassung der Tage - **Neu**
+                    display.setTextSize(1);
+                    display.setCursor(0, 20);
+                    Serial.println("MENU_MODE - Text: Tage werden angepasst..."); // **DEBUGGING - Textinhalt**
+                    display.println(F("Tage werden angepasst...")); // Hinweistext
+                    display.setTextSize(2);
+                    display.setCursor(0, 30);
+                    Serial.println("MENU_MODE - Text: " + String(customDays)); // **DEBUGGING - Textinhalt**
+                    display.println(String(customDays)); // Angepasste Tage anzeigen
+                    break;
+            }
+            break;
+        }
+        default: { // DEFAULT - **Unverändert**
+            Serial.println("Zeichne DEFAULT - Unbekannter Status"); // **DEBUGGING - Case Name**
+            display.setTextSize(2);
+            Serial.println("DEFAULT - Text: Unbekannter Status"); // **DEBUGGING - Textinhalt**
+            display.setCursor(0, 0);
+            display.println(F("Unbekannter Status"));
+            break;
+        }
+    }
+    display.display();
+}
+
+void handleButtonPress() {
+    if (digitalRead(BUTTON_PIN) == HIGH) {
+        delay(100); // Entprellen
+        if (programActive) {
+            stopProgram();
+        } else if (currentMenuState == MAIN_MENU) { // Wenn im Hauptmenü, Menü-Modus aktivieren - **Neu**
+            startMenuMode();
+        } else if (currentMenuState != MAIN_MENU) { // Wenn nicht im Hauptmenü, zurück zum Hauptmenü - **Neu**
+            exitMenuMode();
+        } else {
+            startProgram(programName);
+        }
+    }
+}
+
+void handlePlusButtonPress() { // PLUS Button Funktion - **Neu**
+    if (digitalRead(PLUS_BUTTON) == HIGH) {
+        delay(100); // Entprellen
+        if (currentMenuState == MAIN_MENU) {
+            currentMenuState = PROGRAM_SELECT_MENU;
+            menuTitle = "Programme";
+            displayState = MENU_MODE;
+            programIndex = 0; // Starte Programmauswahl immer bei erstem Eintrag
+            updateDisplay();
+        } else if (currentMenuState == PROGRAM_SELECT_MENU) {
+            programIndex = (programIndex + 1) % 4; // Nächster Programmnamen-Index
+            updateDisplay();
+        } else if (currentMenuState == SETTINGS_MENU) {
+            currentMenuState = SETTINGS_DISPLAY_MENU;
+            menuTitle = "Display-Einstellungen";
+            displayState = MENU_MODE;
+            updateDisplay();
+        } else if (currentMenuState == SETTINGS_DISPLAY_MENU) {
+             // Hier könnten später Optionen für Display-Einstellungen kommen
+        } else if (currentMenuState == SETTINGS_SYSTEM_MENU) {
+             currentMenuState = SETUP_NEW_DAYS_ADJUST; // Zu Custom Days Menüpunkt
+             menuTitle = "Tage anpassen";
+             displayState = MENU_MODE;
+             updateDisplay();
+        } else if (currentMenuState == SETUP_NEW_DAYS_ADJUST) { // Im Modus "Tage anpassen"
+            if (customDays < 99) { // Tage erhöhen, max. 99
+                customDays++;
+                updateDisplay();
+            }
+        }
+        setLED("menu_mode"); // LED Farbe im Menümodus beibehalten
+    }
+}
+
+void handleMinusButtonPress() { // MINUS Button Funktion - **Neu**
+    if (digitalRead(MINUS_BUTTON) == HIGH) {
+        delay(100); // Entprellen
+        if (currentMenuState == PROGRAM_SELECT_MENU) {
+            programIndex = (programIndex - 1 + 4) % 4; // Vorheriger Programmnamen-Index (mit Wrap-around)
+            updateDisplay();
+        } else if (currentMenuState == SETTINGS_MENU) {
+            currentMenuState = SETTINGS_SYSTEM_MENU;
+            menuTitle = "System-Einstellungen";
+            displayState = MENU_MODE;
+            updateDisplay();
+        } else if (currentMenuState == SETTINGS_DISPLAY_MENU) {
+             currentMenuState = SETTINGS_MENU; // Zurück zu Haupt-Einstellungen
+             menuTitle = "Einstellungen";
+             displayState = MENU_MODE;
+             updateDisplay();
+        } else if (currentMenuState == SETTINGS_SYSTEM_MENU) {
+             currentMenuState = SETTINGS_DISPLAY_MENU; // Direkt zu Display-Einstellungen springen
+             menuTitle = "Display-Einstellungen";
+             displayState = MENU_MODE;
+             updateDisplay();
+        } else if (currentMenuState == SETUP_NEW_DAYS_ADJUST) { // Im Modus "Tage anpassen"
+            if (customDays > 1) { // Tage verringern, min. 1
+                customDays--;
+                updateDisplay();
+            }
+        }
+        setLED("menu_mode"); // LED Farbe im Menümodus beibehalten
+    }
+}
+
+
+void startProgram(String programName) {
+    if (programActive) {
+        stopProgram(); // Stop program if active
+    }
+    activeProgram = programName;
+    if (activeProgram == "Programm 1") programDuration = 604800000;
+    else if (activeProgram == "Programm 2") programDuration = 1209600000;
+    else if (activeProgram == "Programm 3") programDuration = 2419200000;
+    else if (activeProgram == "Programm 4") programDuration = 0; // Individuell - JETZT NICHT MEHR WEB-EINSTELLBAR
+    startTime = millis();
+    programActive = true;
+    setLED("program_active");
+    digitalWrite(MOTOR_PIN, HIGH);
+    Serial.println("Programm gestartet: " + activeProgram);
+    updateDisplay();
+}
+
+void stopProgram() {
+    programActive = false;
+    digitalWrite(MOTOR_PIN, LOW);
+    setLED("normal");
+    Serial.println("Programm gestoppt: " + activeProgram);
+    updateDisplay();
+}
+
+void startMenuMode() { // Menü Modus starten - **Neu**
+    Serial.println("Menü Modus gestartet"); // **DEBUGGING**
+    currentMenuState = MAIN_MENU;
+    menuTitle = "Hauptmenü";
+    displayState = MENU_MODE;
+    setLED("menu_mode");
+    updateDisplay();
+}
+
+void exitMenuMode() { // Menü Modus verlassen/beenden - **Neu**
+    Serial.println("Menü Modus beendet"); // **DEBUGGING**
+    currentMenuState = MAIN_MENU; // Setze zurück zum Hauptmenü, falls notwendig
+    displayState = NORMAL; // Zurück zum normalen Display Status
+    setLED("normal"); // LED auf Normal zurücksetzen
+    updateDisplay();
+}
+
+void saveCustomDays() { // Funktion zum Speichern der Custom Days - **Neu**
+    Serial.println("Custom Days gespeichert: " + String(customDays)); // **DEBUGGING**
+    currentMenuState = SETTINGS_SYSTEM_MENU; // Zurück zum System-Einstellungen Menü
+    menuTitle = "System-Einstellungen"; // Menü Titel aktualisieren
+    displayState = MENU_MODE; // Zurück in den Menü Modus
+    updateDisplay(); // Display aktualisieren
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    // Pin Modus setzen
+    pinMode(RED_PIN, OUTPUT);
+    pinMode(GREEN_PIN, OUTPUT);
+    pinMode(BLUE_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLDOWN_16);
+    pinMode(PLUS_BUTTON, INPUT_PULLDOWN_16); // PLUS Button Input mit Pull-Down - **Neu hinzugefügt**
+    pinMode(MINUS_BUTTON, INPUT_PULLDOWN_16); // MINUS Button Input mit Pull-Down - **Neu hinzugefügt**
+    pinMode(MOTOR_PIN, OUTPUT);
+    pinMode(SENSOR_PIN, INPUT);
+
+    // Initialzustand LEDs und Motor
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, LOW);
+    digitalWrite(MOTOR_PIN, LOW);
+
+    setLED("normal");
+
+    // OLED initialisieren
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println(F("Fehler beim Start des OLED-Displays!"));
+        for (;;); // Endlosschleife, falls Display nicht startet
+    }
+    display.clearDisplay();
+    display.display();
+
+    updateDisplay();
+
+    autoStartTimer = millis(); // Timer für Auto-Start starten
+    autoStartActive = true; // Auto-Start Funktion beim Start aktivieren - **Neu**
+
+    Serial.println("Setup abgeschlossen"); // **DEBUGGING**
+}
+
+void loop() {
+    updateDisplay();
+
+    // Handle Buttons
+    handleButtonPress(); // Taster (Programmwechsel - vorerst behalten)
+    handlePlusButtonPress(); // PLUS Button - **Neu**
+    handleMinusButtonPress(); // MINUS Button - **Neu**
+
+
+    // Auto-Start Funktion prüfen - **Neu**
+    if (autoStartActive && (millis() - autoStartTimer >= autoStartTime) && !programActive) {
+        startProgram(programName); // Automatischer Programmstart nach Ablauf der Zeit, falls Auto-Start aktiv
+    }
+
+    // Programmende prüfen und ggf. stoppen (zeitbasiert)
+    if (programActive && programDuration > 0 && (millis() - startTime >= programDuration)) {
+        stopProgram(); // Stoppe Programm nach definierter Dauer
+        displayState = PROGRAM_COMPLETED; // Setze Display Status auf PROGRAM_COMPLETED - **Neu**
+        setLED("normal"); // LED zurück auf Normalbetrieb setzen - **Neu**
+        updateDisplay(); // Display aktualisieren, um "Abgeschlossen" anzuzeigen - **Neu**
+    }
+
+    // Sensorwert abfragen und Error-DisplayState setzen - **Neu**
+    if (digitalRead(SENSOR_PIN) == LOW) { // Sensor liefert LOW, wenn Tank leer/nicht vorhanden
+        if (displayState != ERROR_TANK_LOW && displayState != MENU_MODE){ // Verhindere ständiges Neusetzen und nicht im Menü
+           displayState = ERROR_TANK_LOW;
+           setLED("error"); // LED auf Fehlerfarbe setzen
+           updateDisplay();
+           Serial.println("Tank-Leer-Fehler erkannt und Display aktualisiert"); // **DEBUGGING**
+        }
+    } else {
+        if (displayState == ERROR_TANK_LOW) { // Fehler zurücksetzen, wenn Tank wieder voll/vorhanden
+            displayState = NORMAL;
+            setLED("normal"); // LED zurück auf Normalbetrieb
+            updateDisplay();
+            Serial.println("Tank-Leer-Fehler behoben, Normalzustand wiederhergestellt"); // **DEBUGGING**
+        }
+    }
+}

@@ -1,0 +1,635 @@
+/*
+Hallo lieber Leser, liebe Leserin,
+guten Tag.
+Das ist der finalisierte Code für die Desinfektionseinheit DeSiFeEi
+von Valentino Gobetti.
+
+**Vollständig finalisierte Version ohne Webserver und Logo für maximale Stabilität und Einfachheit.**
+  **Webbasierte Steuerung vollständig entfernt.**
+  **Webseiten-Programmwechsel-Funktion entfernt.**
+  **Protokollierungsfunktion vollständig entfernt.**
+  **Download-Link von der Webseite entfernt.**
+  **Startlogo auf dem OLED-Display beim Systemstart entfernt.**
+  **Logo zentriert auf der Webseite angezeigt.** (Logo Anzeige im Code komplett entfernt)
+
+
+Beschreibung:
+Vereinfachte Lösung für die lokale Steuerung der Desinfektionseinheit mit folgenden Vorteilen:
+
+LCD-Display: Lokale Anzeige des aktuellen Status, des Programmfortschritts und der präzisen Restlaufzeit (OHNE LOGO).
+LED-Feedback: Visuelle Statusanzeige durch eine RGB-LED, die den aktuellen Betriebszustand klar signalisiert.
+Individuelles Programm 4:  Vollständig benutzerdefinierbare Programmdauer **(jetzt nur noch im Code anpassbar)**.
+**Webbasierte Steuerung vollständig entfernt für maximale Stabilität und Einfachheit.**
+**Webseiten-Programmwechsel und individuelle Dauereinstellung entfernt.**
+**Protokollierungsfunktion vollständig entfernt.**
+**Download-Link von der Webseite entfernt.**
+**Startlogo auf dem OLED-Display beim Systemstart entfernt.**
+**Logo zentriert auf der Webseite angezeigt.** (Logo Anzeige im Code komplett entfernt)
+
+Hardware:
+ESP8266 (z. B. D1 Mini).
+I2C-LCD-Display (OLED 0.96" 128X64 Weiss auf Schwarz).
+RGB-LED, Taster und Sensor (optional: Tankstatus-Sensor).
+
+**WICHTIG - Pin-Konfiguration (angepasst, um Konflikte zu vermeiden):**
+* OLED (I2C): SDA = D2 (GPIO4), SCL = D1 (GPIO5) - Standard I2C Pins auf D1 Mini
+* Blaue LED (Statusanzeige): D0 (GPIO16) -  **Umbenannt und Verwendung angepasst, da WLAN entfernt**
+* Taster: D8 (GPIO15) - Geändert von D1, um Konflikt mit I2C SCL zu vermeiden
+* Rote LED: D6 (GPIO12) - Unverändert
+* Grüne LED: D7 (GPIO13) - Unverändert
+* Motor/Relais: D4 (GPIO2) - Unverändert
+* Sensor: D5 (GPIO14) - Unverändert
+
+Bibliotheken:
+Dateisystem: LittleFS für die Speicherung des Protokolls. **(Bibliothek importiert, aber Funktionalität entfernt)**
+Zeit: TimeLib.
+LCD: Adafruit_SSD1306.
+*/
+
+#include <TimeLib.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+
+// Display-Konfiguration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64 // Geändert auf 64 Pixel Höhe für besseres Layout
+#define OLED_RESET -1  // Reset-Pin wird nicht verwendet
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Pins für RGB-LED
+#define RED_PIN D6
+#define GREEN_PIN D7
+#define BLUE_PIN D0  // Blaue LED für Statusanzeige - **Umbenannt und Verwendung angepasst**
+
+// Pins für Taster und Buttons
+#define BUTTON_PIN D8  // Taster-Pin (für Programmwechsel - bleibt bestehen)
+#define PLUS_BUTTON D2   // Neuer Button für "+" Funktion - **Neu hinzugefügt**
+#define MINUS_BUTTON D3  // Neuer Button für "-" Funktion - **Neu hinzugefügt**
+
+// Pins für andere Komponenten
+#define MOTOR_PIN D4   // Motor oder Relais
+#define SENSOR_PIN D5   // Sensor für Tankstatus oder andere Eingänge
+
+/*  Pinbelegung (ASCII-Art zur Übersicht):
+        +-------------------+
+(TX)  | TX  D0  GPIO16   | RST   <-- Blaue LED (Statusanzeige) an D0
+(RX)  | RX  D1  GPIO5     | A0    <-- I2C SCL an D1 (OLED)
+(D1)  | D1  D2  GPIO4     | G     <-- I2C SDA an D2 (OLED)
+(D2)  | D2  D3  GPIO0     | VIN   <-- PLUS_BUTTON an D2
+(D3)  | D3  D4  GPIO2     | TX     <-- MINUS_BUTTON an D3
+(D4)  | D4  D5  GPIO14    | RX     <-- Motor/Relais an D4
+(G)   | G   D6  GPIO12    | D7     <-- Rote LED an D6
+(5V)  | 5V  D7  GPIO13    | D8     <-- Grüne LED an D7
+(3V3) | 3V3 D8  GPIO15    | 3V3    <-- Taster an D8
+        +-------------------+
+*/
+
+
+// Menü Status Definition
+enum MenuState {
+    START_SCREEN,
+    MAIN_MENU,
+    SETUP_14_DAYS_CONFIRM,
+    SETUP_21_DAYS_CONFIRM,
+    SETUP_NEW_DAYS_INIT,
+    SETUP_NEW_DAYS_ADJUST,
+    SETUP_CONFIRMATION,
+    PROGRAM_RUNNING,
+    PROGRAM_COMPLETED,
+    ERROR_TANK_LOW
+};
+
+MenuState currentMenuState = START_SCREEN; // Startmenü beim Start
+
+// Tastenlogik-Zustände (für Programmwechsel über Taster) - bleibt vorerst bestehen, kann später angepasst werden
+enum ButtonState {
+  IDLE,
+  SHORT_PRESS_DETECTED,
+  WAITING_FOR_LONG_PRESS
+};
+
+ButtonState buttonState = IDLE;
+
+unsigned long buttonPressStart = 0;
+unsigned long shortPressDetectedAt = 0;
+const unsigned long shortPressDuration = 200;
+const unsigned long longPressDuration = 2000;
+const unsigned long waitingDuration = 5000;
+
+String activeProgram = "Programm 2"; // Aktives Programm (Standardprogramm beim Start)
+unsigned long programDuration = 1209600000; // Standard-Programmdauer für Programm 2: 2 Wochen
+unsigned long startTime = 0;
+bool programActive = false;
+
+int customDays = 7; // Standardwert für benutzerdefiniertes Programm
+unsigned long autoStartTimer = 0; // Timer für automatischen Start des 14-Tage Programms nach Startbildschirm
+bool autoStartActive = true; // Flag, um automatischen Start nur einmal auszuführen
+
+// Variablen für Scrolling Text
+int scrollPosition = 0;           // Aktuelle Scrollposition (horizontaler Offset)
+const int scrollSpeed = 200;        // Scrollgeschwindigkeit (Verzögerung in Millisekunden)
+unsigned long lastScrollTime = 0;   // Zeitstempel der letzten Scrollbewegung
+int maxScrollPosition_StartScreenTitle = 0; // Maximale Scrollposition für Startbildschirm Titel **NEU**
+int maxScrollPosition_StartScreenMessage = 0; // Maximale Scrollposition für Startbildschirm Nachricht **NEU Benannt**
+int maxScrollPosition_MainMenu = 0;
+int maxScrollPosition_NewSetupInit = 0;
+
+
+// Funktion zur Steuerung der RGB-LED (Statusanzeige)
+void setLED(String status) {
+  if (status == "normal") {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, LOW);
+  } else if (status == "problem") {
+    digitalWrite(RED_PIN, HIGH);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, LOW);
+  } else if (status == "program_active") {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, HIGH);
+    digitalWrite(BLUE_PIN, HIGH);
+  } else {
+    digitalWrite(RED_PIN, LOW);
+    digitalWrite(GREEN_PIN, LOW);
+    digitalWrite(BLUE_PIN, LOW);
+  }
+}
+
+// Tasterlogik für Programmwechsel (durch Tastendruck am Gerät) - Behalten, aber Funktionalität im neuen Menü irrelevant
+void handleButtonPress() {
+  int buttonStateCurrent = digitalRead(BUTTON_PIN);
+
+  switch (buttonState) {
+    case IDLE:
+      if (buttonStateCurrent == HIGH) {
+        buttonPressStart = millis();
+        while (digitalRead(BUTTON_PIN) == HIGH) {
+          delay(10);
+        }
+        if (millis() - buttonPressStart < shortPressDuration) {
+          buttonState = SHORT_PRESS_DETECTED;
+          shortPressDetectedAt = millis();
+          Serial.println("Kurzer Druck erkannt, Warte auf langen Druck...");
+        }
+      }
+      break;
+
+    case SHORT_PRESS_DETECTED:
+      if (millis() - shortPressDetectedAt > waitingDuration) {
+        buttonState = IDLE;
+        Serial.println("Zeitfenster abgelaufen, zurück zu IDLE");
+      } else if (buttonStateCurrent == HIGH) {
+        buttonPressStart = millis();
+        while (digitalRead(BUTTON_PIN) == HIGH) {
+          delay(10);
+        }
+        if (millis() - buttonPressStart >= longPressDuration) {
+          buttonState = WAITING_FOR_LONG_PRESS;
+          Serial.println("Langer Druck erkannt, Programm wird geändert...");
+        }
+      }
+      break;
+
+    case WAITING_FOR_LONG_PRESS:
+      changeProgram(); // Funktion zum Programmwechsel aufrufen - **Funktionalität im neuen Menü überdenken**
+      buttonState = IDLE;
+      break;
+  }
+}
+
+// Programm ändern (Zyklisch durch die Programme wechseln) - Behalten, aber Funktionalität im neuen Menü überdenken
+void changeProgram() {
+  if (programActive) {
+    stopProgram();
+  }
+  if (activeProgram == "Programm 1") {
+    activeProgram = "Programm 2";
+    programDuration = 1209600000;
+  } else if (activeProgram == "Programm 2") {
+    activeProgram = "Programm 3";
+    programDuration = 2419200000;
+  } else if (activeProgram == "Programm 3") {
+    activeProgram = "Programm 4";
+    programDuration = 0;
+  } else if (activeProgram == "Programm 4") {
+    activeProgram = "Programm 1";
+    programDuration = 604800000;
+  }
+  startTime = millis();
+  Serial.println("Programm geändert (Taster): " + activeProgram);
+  updateDisplay();
+}
+
+
+// Funktion zur Berechnung der Restlaufzeit und Formatierung
+String getFormattedRemainingTime() {
+  if (!programActive || programDuration == 0) {
+    return programActive ? "Individuell" : "Bereit";
+  }
+
+  unsigned long elapsedTime = millis() - startTime;
+  if (elapsedTime >= programDuration) {
+    stopProgram();
+    return "Abgelaufen";
+  }
+
+  unsigned long remainingTimeMillis = programDuration - elapsedTime;
+  long remainingSeconds = remainingTimeMillis / 1000;
+  long remainingMinutes = remainingSeconds / 60;
+  long remainingHours = remainingMinutes / 60;
+  long remainingDays = remainingHours / 24;
+
+  remainingSeconds %= 60;
+  remainingMinutes %= 60;
+  remainingHours %= 24;
+
+  String formattedTime = "";
+  if (remainingDays > 0) {
+    formattedTime += String(remainingDays) + "T ";
+  }
+  if (remainingHours > 0 || remainingDays > 0) {
+    formattedTime += String(remainingHours) + "Std ";
+  }
+  formattedTime += String(remainingMinutes) + "Min";
+
+  return formattedTime;
+}
+
+// Display aktualisieren (OLED) - **JETZT MIT LINIEN, FORTSCHRITTSBALKEN & DURCHLAUFENDEM TEXT - LAYOUT OPTIMIERT - DEBUGGING AUSGABEN HINZUGEFÜGT - FORTSCHRITTSBALKEN & RESTZEIT HINZUGEFÜGT**
+void updateDisplay() {
+  Serial.print("updateDisplay() aufgerufen - currentMenuState: "); // **DEBUGGING - Menüstatus**
+  Serial.println(currentMenuState);                                  // **DEBUGGING - Menüstatus**
+
+  display.clearDisplay();
+  display.setTextSize(1); // Standard Textgrösse 1 setzen
+  display.setTextColor(WHITE);
+
+  String textToScroll; // Variable für den Text, der durchlaufen soll
+  int textWidth;       // Breite des Textes in Pixeln
+  int16_t x1, y1; // Variablen für Textbegrenzungen
+  uint16_t w, h;
+
+
+  switch (currentMenuState) {
+      case START_SCREEN: { // START_SCREEN - **Layout OPTIMIERT**
+          Serial.println("Zeichne START_SCREEN"); // **DEBUGGING - Case Name**
+          display.setTextSize(1); // Titel Textgrösse auf 1
+          textToScroll = F("Desinfektionseinheit");
+          display.getTextBounds(textToScroll, 0, 0, &x1, &y1, &w, &h);
+          textWidth = w;
+          maxScrollPosition_StartScreenTitle = textWidth;
+          Serial.print("START_SCREEN - scrollPosition: ");       // **DEBUGGING - Scroll Pos**
+          Serial.println(scrollPosition);                        // **DEBUGGING - Scroll Pos**
+          Serial.print("START_SCREEN - maxScrollPosition_StartScreenTitle: "); // **DEBUGGING - Max Scroll Pos**
+          Serial.println(maxScrollPosition_StartScreenTitle);                  // **DEBUGGING - Max Scroll Pos**
+          Serial.println("START_SCREEN - Titeltext: Desinfektionseinheit");    // **DEBUGGING - Textinhalt**
+          display.setCursor(scrollPosition, 1); // Titel etwas tiefer gesetzt
+          display.println(textToScroll);
+          display.drawLine(0, 10, SCREEN_WIDTH - 1, 10, WHITE); // Linie unter Titel, Position angepasst
+          Serial.println("START_SCREEN - Nachrichtentext: 14 Tage Programm startet..."); // **DEBUGGING - Textinhalt**
+          display.setTextSize(1);
+          textToScroll = F("14 Tage Programm startet...");
+          display.getTextBounds(textToScroll, 0, 0, &x1, &y1, &w, &h);
+          textWidth = w;
+          maxScrollPosition_StartScreenMessage = textWidth;
+          Serial.print("START_SCREEN - scrollPosition (Nachricht): "); // **DEBUGGING - Scroll Pos**
+          Serial.println(scrollPosition);                                // **DEBUGGING - Scroll Pos**
+          Serial.print("START_SCREEN - maxScrollPosition_StartScreenMessage: "); // **DEBUGGING - Max Scroll Pos**
+          Serial.println(maxScrollPosition_StartScreenMessage);                  // **DEBUGGING - Max Scroll Pos**
+          display.setCursor(scrollPosition, 14); // Nachricht unter Linie, Position angepasst
+          display.println(textToScroll);
+          break;
+      }
+
+      case MAIN_MENU: { // MAIN_MENU - **Layout OPTIMIERT**
+          Serial.println("Zeichne MAIN_MENU"); // **DEBUGGING - Case Name**
+          display.setTextSize(2);
+          Serial.println("MAIN_MENU - Titeltext: Neues Setup"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Neues Setup"));
+          display.drawLine(0, 17, SCREEN_WIDTH - 1, 17, WHITE); // Linie unter "Neues Setup", Position angepasst
+          display.setTextSize(1);
+          textToScroll = F("+/- Tasten halten bis Text blinkt  Start = beide Tasten");
+          display.getTextBounds(textToScroll, 0, 0, &x1, &y1, &w, &h);
+          textWidth = w;
+          maxScrollPosition_MainMenu = textWidth;
+          Serial.print("MAIN_MENU - scrollPosition: "); // **DEBUGGING - Scroll Pos**
+          Serial.println(scrollPosition);                  // **DEBUGGING - Scroll Pos**
+          Serial.print("MAIN_MENU - maxScrollPosition_MainMenu: "); // **DEBUGGING - Max Scroll Pos**
+          Serial.println(maxScrollPosition_MainMenu);                  // **DEBUGGING - Max Scroll Pos**
+          Serial.println("MAIN_MENU - Scrolltext: +/- Tasten halten ..."); // **DEBUGGING - Textinhalt**
+          display.setCursor(scrollPosition, 20); // Scrollende Zeile unter Linie, Position angepasst
+          display.println(textToScroll);
+          break;
+      }
+
+      case SETUP_14_DAYS_CONFIRM: { // SETUP_14_DAYS_CONFIRM - **Layout OPTIMIERT**
+          Serial.println("Zeichne SETUP_14_DAYS_CONFIRM"); // **DEBUGGING - Case Name**
+          display.setTextSize(1);
+          Serial.println("SETUP_14_DAYS_CONFIRM - Text: 14 Tage Setup"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("14 Tage Setup"));
+          display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+          Serial.println("SETUP_14_DAYS_CONFIRM - Text: ausgewaehlt, Bitte"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 9); // Textposition angepasst
+          display.println(F("ausgewaehlt, Bitte"));
+          Serial.println("SETUP_14_DAYS_CONFIRM - Text: schalten Sie das"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 17); // Textposition angepasst
+          display.println(F("schalten Sie das"));
+          Serial.println("SETUP_14_DAYS_CONFIRM - Text: Geraet nicht aus."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 25);
+          display.println(F("Geraet nicht aus."));
+          break;
+      }
+
+      case SETUP_21_DAYS_CONFIRM: { // SETUP_21_DAYS_CONFIRM - **Layout OPTIMIERT**
+          Serial.println("Zeichne SETUP_21_DAYS_CONFIRM"); // **DEBUGGING - Case Name**
+          display.setTextSize(1);
+          Serial.println("SETUP_21_DAYS_CONFIRM - Text: 21 Tage Setup"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("21 Tage Setup"));
+          display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+          Serial.println("SETUP_21_DAYS_CONFIRM - Text: ausgewaehlt, Bitte"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 9); // Textposition angepasst
+          display.println(F("ausgewaehlt, Bitte"));
+          Serial.println("SETUP_21_DAYS_CONFIRM - Text: schalten Sie das"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 17); // Textposition angepasst
+          display.println(F("schalten Sie das"));
+          Serial.println("SETUP_21_DAYS_CONFIRM - Text: Geraet nicht aus."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 25);
+          display.println(F("Geraet nicht aus."));
+          break;
+      }
+
+      case SETUP_NEW_DAYS_INIT: { // SETUP_NEW_DAYS_INIT - **Layout OPTIMIERT**
+          Serial.println("Zeichne SETUP_NEW_DAYS_INIT"); // **DEBUGGING - Case Name**
+          display.setTextSize(2);
+          Serial.println("SETUP_NEW_DAYS_INIT - Text: Neues Setup"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Neues Setup"));
+          display.drawLine(0, 17, SCREEN_WIDTH - 1, 17, WHITE); // Linie unter "Neues Setup", Position angepasst
+          display.setTextSize(1);
+          textToScroll = F("+/- Tasten halten bis Text blinkt  fuer 7 bis 99 Tage");
+          display.getTextBounds(textToScroll, 0, 0, &x1, &y1, &w, &h);
+          textWidth = w;
+          maxScrollPosition_NewSetupInit = textWidth;
+          Serial.print("SETUP_NEW_DAYS_INIT - scrollPosition: "); // **DEBUGGING - Scroll Pos**
+          Serial.println(scrollPosition);                           // **DEBUGGING - Scroll Pos**
+          Serial.print("SETUP_NEW_DAYS_INIT - maxScrollPosition_NewSetupInit: "); // **DEBUGGING - Max Scroll Pos**
+          Serial.println(maxScrollPosition_NewSetupInit);                     // **DEBUGGING - Max Scroll Pos**
+          Serial.println("SETUP_NEW_DAYS_INIT - Scrolltext: +/- Tasten halten ..."); // **DEBUGGING - Textinhalt**
+          display.setCursor(scrollPosition, 20); // Scrollende Zeile unter Linie, Position angepasst
+          display.println(textToScroll);
+          break;
+      }
+
+      case SETUP_NEW_DAYS_ADJUST: { // SETUP_NEW_DAYS_ADJUST - **Layout OPTIMIERT**
+          Serial.println("Zeichne SETUP_NEW_DAYS_ADJUST"); // **DEBUGGING - Case Name**
+          display.setTextSize(2);
+          Serial.print("SETUP_NEW_DAYS_ADJUST - Text: Neues Setup: "); // **DEBUGGING - Textinhalt**
+          Serial.print(customDays);                                    // **DEBUGGING - Textinhalt**
+          Serial.println(" Tage");                                    // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.print(F("Neues Setup: "));
+          display.print(customDays);
+          display.print(F(" Tage"));
+          display.drawLine(0, 17, SCREEN_WIDTH - 1, 17, WHITE); // Linie unter "Neues Setup: xx Tage", Position angepasst
+          Serial.println("SETUP_NEW_DAYS_ADJUST - Text: +/- Tasten aendern"); // **DEBUGGING - Textinhalt**
+          display.setTextSize(1);
+          display.setCursor(0, 20);
+          display.println(F("+/- Tasten aendern"));
+          Serial.println("SETUP_NEW_DAYS_ADJUST - Text: Start = beide Tasten"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 28);
+          display.println(F("Start = beide Tasten"));
+          break;
+      }
+
+      case PROGRAM_RUNNING: { // PROGRAM_RUNNING - **Layout OPTIMIERT, FORTSCHRITTSBALKEN & RESTZEIT HINZUGEFÜGT**
+          Serial.println("Zeichne PROGRAM_RUNNING"); // **DEBUGGING - Case Name**
+          display.setTextSize(2);
+          Serial.println("PROGRAM_RUNNING - Text: Desinfektion laeuft"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Desinfektion laeuft")); // Titel bleibt oben
+          display.drawLine(0, 17, SCREEN_WIDTH - 1, 17, WHITE); // Linie unter Titel, Position angepasst
+          display.setTextSize(1);
+          Serial.println("PROGRAM_RUNNING - Text: Restzeit: ..."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 20); // Restzeit direkt unter Titel, Position angepasst
+          display.print(F("Restzeit: "));
+          display.println(getFormattedRemainingTime());
+
+          // Fortschrittsbalken - Unverändert, sollte jetzt aber funktionieren
+          int progressBarX = 5;
+          int progressBarY = 35; // Fortschrittsbalken weiter nach unten verschoben, Position angepasst
+          int progressBarWidth = SCREEN_WIDTH - 10;
+          int progressBarHeight = 8;
+          unsigned long elapsedTime = millis() - startTime;
+          int progressPercentage = (programDuration > 0) ? map(elapsedTime, 0, programDuration, 0, 100) : 0;
+          int filledWidth = (progressBarWidth * progressPercentage) / 100;
+
+          display.drawRect(progressBarX, progressBarY, progressBarWidth, progressBarHeight, WHITE);
+          display.fillRect(progressBarX, progressBarY, filledWidth, progressBarHeight, WHITE);
+          break;
+      }
+
+      case PROGRAM_COMPLETED: { // PROGRAM_COMPLETED - **Layout OPTIMIERT**
+          Serial.println("Zeichne PROGRAM_COMPLETED"); // **DEBUGGING - Case Name**
+          display.setTextSize(1);
+          Serial.println("PROGRAM_COMPLETED - Text: Desinfektions"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Desinfektions"));
+          display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+          Serial.println("PROGRAM_COMPLETED - Text: Abgeschlossen."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 9); // Textposition angepasst
+          display.println(F("Abgeschlossen."));
+          display.drawLine(0, 15, SCREEN_WIDTH - 1, 15, WHITE);
+          Serial.println("PROGRAM_COMPLETED - Text: Tank entfernen."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 17); // Textposition angepasst
+          display.println(F("Tank entfernen."));
+          Serial.println("PROGRAM_COMPLETED - Text: Standby Aktiv."); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 25); // Textposition angepasst, mehr Platz nach oben
+          display.println(F("Standby Aktiv."));
+          break;
+      }
+
+      case ERROR_TANK_LOW: { // ERROR_TANK_LOW - **Layout OPTIMIERT**
+          Serial.println("Zeichne ERROR_TANK_LOW"); // **DEBUGGING - Case Name**
+          display.setTextSize(1);
+          Serial.println("ERROR_TANK_LOW - Text: Fehlermeldung"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Fehlermeldung"));
+          display.drawLine(0, 7, SCREEN_WIDTH - 1, 7, WHITE);
+          Serial.println("ERROR_TANK_LOW - Text: Fuellstand im"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 9); // Textposition angepasst
+          display.println(F("Fuellstand im"));
+          Serial.println("ERROR_TANK_LOW - Text: Tank zu gering!"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 17); // Textposition angepasst
+          display.println(F("Tank zu gering!"));
+          display.drawLine(0, 23, SCREEN_WIDTH - 1, 23, WHITE);
+          Serial.println("ERROR_TANK_LOW - Text: Neustarten fuer"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 25); // Textposition angepasst, mehr Platz nach oben
+          display.println(F("Neustarten fuer"));
+          Serial.println("ERROR_TANK_LOW - Text: Inbetriebnahme"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 33); // Textposition angepasst, noch mehr Platz
+          display.println(F("Inbetriebnahme"));
+          break;
+      }
+
+      default: { // DEFAULT - **Unverändert**
+          Serial.println("Zeichne DEFAULT - Unbekannter Status"); // **DEBUGGING - Case Name**
+          display.setTextSize(2);
+          Serial.println("DEFAULT - Text: Unbekannter Status"); // **DEBUGGING - Textinhalt**
+          display.setCursor(0, 0);
+          display.println(F("Unbekannter Status"));
+          break;
+      }
+  }
+  display.display();
+}
+
+
+void startProgram(String programName) {
+  if (programActive) {
+    stopProgram();
+  }
+  activeProgram = programName;
+  if (activeProgram == "Programm 1") programDuration = 604800000;
+  else if (activeProgram == "Programm 2") programDuration = 1209600000;
+  else if (activeProgram == "Programm 3") programDuration = 2419200000;
+  else if (activeProgram == "Programm 4") programDuration = 0; // Individuell - JETZT NICHT MEHR WEB-EINSTELLBAR
+  startTime = millis();
+  programActive = true;
+  setLED("program_active");
+  digitalWrite(MOTOR_PIN, HIGH);
+  Serial.println("Programm gestartet: " + activeProgram);
+  updateDisplay();
+}
+
+void stopProgram() {
+  programActive = false;
+  digitalWrite(MOTOR_PIN, LOW);
+  setLED("normal");
+  Serial.println("Programm gestoppt: " + activeProgram);
+  updateDisplay();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Pin Modus setzen
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLDOWN_16);
+  pinMode(PLUS_BUTTON, INPUT_PULLDOWN_16); // PLUS Button Input mit Pull-Down - **Neu hinzugefügt**
+  pinMode(MINUS_BUTTON, INPUT_PULLDOWN_16); // MINUS Button Input mit Pull-Down - **Neu hinzugefügt**
+  pinMode(MOTOR_PIN, OUTPUT);
+  pinMode(SENSOR_PIN, INPUT);
+
+  // Initialzustand LEDs und Motor
+  digitalWrite(RED_PIN, LOW);
+  digitalWrite(GREEN_PIN, LOW);
+  digitalWrite(BLUE_PIN, LOW);
+  digitalWrite(MOTOR_PIN, LOW);
+
+  setLED("normal");
+
+
+  // OLED initialisieren
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Fehler beim Start des OLED-Displays!");
+    for (;;);
+  }
+  display.clearDisplay();
+  display.display();
+
+  updateDisplay();
+
+  autoStartTimer = millis(); // Timer für Auto-Start starten
+
+}
+
+unsigned long lastMotorActionTime = 0;
+const unsigned long motorInterval = 86400000;
+const unsigned long motorRunTime = 60000;
+
+void loop() {
+  // Handle Buttons
+  handleButtonPress(); // Taster (Programmwechsel - vorerst behalten)
+  // Handle PLUS/MINUS Buttons für Menünavigation - **Neu implementiert**
+  if (digitalRead(PLUS_BUTTON) == HIGH) {
+      // ... Menü-Navigation mit PLUS Button ...
+      if (currentMenuState == SETUP_NEW_DAYS_ADJUST && customDays < 99) {
+          customDays++;
+          updateDisplay();
+      }
+      delay(100); // Entprellen
+  }
+  if (digitalRead(MINUS_BUTTON) == HIGH) {
+      // ... Menü-Navigation mit MINUS Button ...
+       if (currentMenuState == SETUP_NEW_DAYS_ADJUST && customDays > 7) {
+          customDays--;
+          updateDisplay();
+      }
+      delay(100); // Entprellen
+  }
+
+    //Simultandruck START - Beispiel Logik - **Muss noch finalisiert werden mit Menü Status**
+    if (digitalRead(PLUS_BUTTON) == HIGH && digitalRead(MINUS_BUTTON) == HIGH) {
+        if (currentMenuState == SETUP_NEW_DAYS_ADJUST) {
+            programDuration = (unsigned long)customDays * 86400000UL; // Tage in Millisekunden umrechnen
+            startProgram("Programm 4 (Custom)"); // Programm 4 als Custom kennzeichnen
+            currentMenuState = PROGRAM_RUNNING; // Direkt zu Programm Running wechseln
+        } else if (currentMenuState == MAIN_MENU) { // Start 14 Tage Programm vom Hauptmenü aus
+            currentMenuState = SETUP_14_DAYS_CONFIRM; // Zu Confirmation Screen wechseln
+             programDuration = 1209600000;
+             startProgram("Programm 2"); // Programm 2 ist 14 Tage
+        }
+         delay(500); // Entprellen und kurze Pause
+    }
+
+
+  updateDisplay();
+
+  // Scrolling Text Logik -  JETZT direkt in loop() ausgelagert für präzisere Steuerung
+  if (currentMenuState == START_SCREEN || currentMenuState == MAIN_MENU || currentMenuState == SETUP_NEW_DAYS_INIT) {
+      if (millis() - lastScrollTime > scrollSpeed) {
+          lastScrollTime = millis();
+          scrollPosition--; // Scrollen nach links
+          if (currentMenuState == START_SCREEN && scrollPosition < -maxScrollPosition_StartScreenTitle) scrollPosition = 0;
+          if (currentMenuState == MAIN_MENU && scrollPosition < -maxScrollPosition_MainMenu) scrollPosition = 0;
+          if (currentMenuState == SETUP_NEW_DAYS_INIT && scrollPosition < -maxScrollPosition_NewSetupInit) scrollPosition = 0;
+          updateDisplay(); // Display neu zeichnen, damit Scrollbewegung sichtbar wird
+      }
+  }
+
+
+  // Auto-Start Logik für 14-Tage Programm nach Startbildschirm
+  if (currentMenuState == START_SCREEN && autoStartActive && (millis() - autoStartTimer > 60000)) { // Nach 1 Minute (60000ms)
+      currentMenuState = SETUP_14_DAYS_CONFIRM; // Zu Confirmation Screen wechseln
+      programDuration = 1209600000; // 14 Tage Programm
+      startProgram("Programm 2"); // Programm 2 ist 14 Tage
+      autoStartActive = false; // Auto-Start nur einmal ausführen
+  }
+
+
+  if (programActive && programDuration > 0) {
+    if (millis() - startTime < programDuration) {
+      if (millis() - lastMotorActionTime >= motorInterval) {
+        digitalWrite(MOTOR_PIN, HIGH);
+        Serial.println("Motor EIN für Desinfektion");
+        setLED("program_active");
+        lastMotorActionTime = millis();
+      }
+      if (digitalRead(MOTOR_PIN) == HIGH && millis() - lastMotorActionTime >= motorRunTime + motorInterval) {
+        digitalWrite(MOTOR_PIN, LOW);
+        Serial.println("Motor AUS nach Desinfektion");
+        setLED("program_active");
+      }
+    } else if (programActive) {
+      stopProgram();
+      currentMenuState = PROGRAM_COMPLETED; // Zu Completed Screen wechseln nach Programmende
+      updateDisplay(); // Display final Completed Screen
+    }
+  }
+}
