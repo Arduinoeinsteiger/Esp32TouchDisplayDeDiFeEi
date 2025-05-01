@@ -1,0 +1,268 @@
+Ich erstelle Ihnen eine detaillierte Anleitung, wie die SwissAirDry-App für die AppAPI angepasst werden kann:
+
+1. **App-Struktur anpassen**
+Die App muss der Nextcloud AppAPI-Struktur folgen. Hier ist die empfohlene Verzeichnisstruktur:
+
+```
+swissairdry/
+├── appinfo/
+│   ├── info.xml           # App-Metadaten
+│   └── app.php            # App-Initialisierung
+├── lib/
+│   ├── AppInfo/
+│   │   └── Application.php
+│   ├── Controller/
+│   │   └── ApiController.php
+│   └── Service/
+│       └── MQTTService.php
+├── templates/
+│   └── index.php
+└── js/
+    └── script.js
+```
+
+2. **info.xml erstellen**
+Die `appinfo/info.xml` sollte so aussehen:
+
+```xml
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+    <id>swissairdry</id>
+    <name>SwissAirDry</name>
+    <summary>SwissAirDry App for Nextcloud</summary>
+    <description>Monitor and control your SwissAirDry devices through Nextcloud</description>
+    <version>1.0.0</version>
+    <licence>agpl</licence>
+    <author>Valentin Begnis</author>
+    <namespace>SwissAirDry</namespace>
+    <category>monitoring</category>
+    <bugs>https://github.com/valentinbegnis/swissairdry/issues</bugs>
+    <dependencies>
+        <nextcloud min-version="28" max-version="31"/>
+    </dependencies>
+    <repair-steps>
+        <install>
+            <step>OCA\SwissAirDry\Migration\InstallStep</step>
+        </install>
+    </repair-steps>
+    <navigations>
+        <navigation>
+            <name>SwissAirDry</name>
+            <route>swissairdry.page.index</route>
+        </navigation>
+    </navigations>
+</info>
+```
+
+3. **Docker-Integration**
+Erstellen Sie eine `Dockerfile.appapi` für die AppAPI-Integration:
+
+```dockerfile
+FROM php:8.1-apache
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    libmosquitto-dev \
+    && docker-php-ext-install sockets \
+    && pecl install Mosquitto-0.4.0 \
+    && docker-php-ext-enable mosquitto
+
+# Copy app files
+COPY . /app
+WORKDIR /app
+
+# Install composer dependencies
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+RUN composer install --no-dev
+
+# Set permissions
+RUN chown -R www-data:www-data /app
+
+# Environment variables
+ENV MQTT_BROKER=swissairdry-mqtt \
+    MQTT_PORT=1884 \
+    API_URL=http://swissairdry-api:5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
+
+EXPOSE 80
+```
+
+4. **AppAPI-Konfiguration**
+Erstellen Sie eine `appapi.json` für die App-Konfiguration:
+
+```json
+{
+    "id": "swissairdry",
+    "name": "SwissAirDry",
+    "version": "1.0.0",
+    "description": "SwissAirDry App for Nextcloud",
+    "author": "Valentin Begnis",
+    "namespace": "SwissAirDry",
+    "category": "monitoring",
+    "containers": [
+        {
+            "name": "app",
+            "image": "swissairdry-app",
+            "ports": ["80:80"],
+            "volumes": [
+                "/var/www/html:/app"
+            ],
+            "environment": {
+                "MQTT_BROKER": "swissairdry-mqtt",
+                "MQTT_PORT": "1884",
+                "API_URL": "http://swissairdry-api:5000"
+            },
+            "depends_on": [
+                "mqtt",
+                "api"
+            ]
+        },
+        {
+            "name": "mqtt",
+            "image": "eclipse-mosquitto:2",
+            "ports": ["1884:1883"],
+            "volumes": [
+                "./mosquitto/config:/mosquitto/config"
+            ]
+        },
+        {
+            "name": "api",
+            "image": "swissairdry-api",
+            "ports": ["5000:5000"],
+            "environment": {
+                "MQTT_BROKER": "swissairdry-mqtt",
+                "MQTT_PORT": "1884"
+            }
+        }
+    ],
+    "init_scripts": [
+        {
+            "script": "php /app/occ maintenance:install",
+            "container": "app"
+        }
+    ]
+}
+```
+
+5. **App-Code anpassen**
+Die `lib/AppInfo/Application.php` sollte die AppAPI-Integration implementieren:
+
+```php
+<?php
+namespace OCA\SwissAirDry\AppInfo;
+
+use OCP\AppFramework\App;
+use OCP\AppFramework\Bootstrap\IBootstrap;
+use OCP\AppFramework\Bootstrap\IRegistrationContext;
+use OCP\AppFramework\Bootstrap\IBootContext;
+use OCA\SwissAirDry\Service\MQTTService;
+
+class Application extends App implements IBootstrap {
+    public const APP_ID = 'swissairdry';
+
+    public function __construct() {
+        parent::__construct(self::APP_ID);
+    }
+
+    public function register(IRegistrationContext $context): void {
+        $context->registerService(MQTTService::class, function($c) {
+            return new MQTTService(
+                $c->getConfig(),
+                $c->getLogger()
+            );
+        });
+    }
+
+    public function boot(IBootContext $context): void {
+        // Boot-Zeit-Initialisierung
+    }
+}
+```
+
+6. **MQTT-Service anpassen**
+Der `lib/Service/MQTTService.php` sollte die MQTT-Integration implementieren:
+
+```php
+<?php
+namespace OCA\SwissAirDry\Service;
+
+use OCP\IConfig;
+use Psr\Log\LoggerInterface;
+
+class MQTTService {
+    private $mqtt;
+    private $logger;
+
+    public function __construct(IConfig $config, LoggerInterface $logger) {
+        $this->logger = $logger;
+        $this->mqtt = new \Mosquitto\Client();
+        
+        $broker = getenv('MQTT_BROKER') ?: 'localhost';
+        $port = getenv('MQTT_PORT') ?: 1884;
+        
+        $this->mqtt->connect($broker, $port, 60);
+    }
+
+    public function publish($topic, $message) {
+        try {
+            $this->mqtt->publish($topic, $message, 1, false);
+            return true;
+        } catch (\Exception $e) {
+            $this->logger->error('MQTT publish error: ' . $e->getMessage());
+            return false;
+        }
+    }
+
+    public function subscribe($topic, $callback) {
+        try {
+            $this->mqtt->subscribe($topic, function($message) use ($callback) {
+                $callback($message);
+            });
+            return true;
+        } catch (\Exception $e) {
+            $this->logger->error('MQTT subscribe error: ' . $e->getMessage());
+            return false;
+        }
+    }
+}
+```
+
+7. **Installation und Deployment**
+Nach diesen Anpassungen können Sie die App über die AppAPI installieren:
+
+```bash
+# Registrieren Sie die App
+docker exec -u www-data nextcloud php occ app_api:app:register swissairdry docker \
+    --json-info /path/to/appapi.json \
+    --env "MQTT_BROKER=swissairdry-mqtt:1884" \
+    --env "API_URL=http://swissairdry-api:5000"
+
+# Installieren Sie die App
+docker exec -u www-data nextcloud php occ app_api:app:install swissairdry
+```
+
+8. **Monitoring und Wartung**
+Fügen Sie Gesundheitsprüfungen hinzu:
+
+```php
+// In lib/Controller/ApiController.php
+public function health() {
+    $status = [
+        'mqtt' => $this->mqttService->isConnected(),
+        'api' => $this->checkApiConnection(),
+        'timestamp' => time()
+    ];
+    return new JSONResponse($status);
+}
+```
+
+Diese Anpassungen ermöglichen:
+- Nahtlose Integration mit der Nextcloud AppAPI
+- Containerisierte Deployment-Struktur
+- Automatische Konfiguration der MQTT- und API-Verbindungen
+- Gesundheitsüberwachung und Logging
+
+Möchten Sie, dass ich einen bestimmten Teil detaillierter erkläre oder haben Sie Fragen zu einer spezifischen Komponente?

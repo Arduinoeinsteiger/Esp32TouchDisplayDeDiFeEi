@@ -1,8 +1,8 @@
 /*
- * Desinfektionseinheit Controller mit LVGL GUI
+ * Desinfektionseinheit Controller mit LVGL GUI und Remote-Steuerung
  * 
- * Steuerungssystem für eine Desinfektionseinheit mit Touch-LCD-Interface und
- * verschiedenen Programmen, Laufzeiten, und Status-Anzeigen.
+ * Steuerungssystem für eine Desinfektionseinheit mit Touch-LCD-Interface,
+ * verschiedenen Programmen, Laufzeiten, Status-Anzeigen und Remote-Steuerung.
  * 
  * Hardware:
  * - ESP32-S3-Touch-LCD-4.3B
@@ -10,11 +10,19 @@
  * - RGB-LED für externe Statusanzeige
  * - Motor/Relais für Desinfektionssteuerung
  * - Sensoren für Tankfüllstand
+ * - WiFi für Remote-Steuerung und Überwachung
+ * 
+ * Kommunikationsfunktionen:
+ * - MQTT für IoT-Integration und Fernüberwachung
+ * - REST API für externe Steuerung und Statusabrufe
+ * - WiFi-Verbindungsmanager mit Fallback auf Access Point Modus
  * 
  * Verwendete Bibliotheken:
  * - LVGL für die GUI
  * - TFT_eSPI als Display-Treiber
  * - ESP32Time für präzise Zeitfunktionen
+ * - PubSubClient für MQTT-Kommunikation
+ * - ArduinoJson für Datenserialierung
  * 
  * Hinweis: Anpassungen an Pin-Konfigurationen und Hardware-Setup sind 
  * möglicherweise erforderlich.
@@ -25,6 +33,18 @@
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <ESP32Time.h>
+
+// Kommunikationsbibliotheken
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+
+// Eigene Module
+#include "wifi_manager.h"
+#include "mqtt_communication.h"
+#include "rest_api.h"
 
 // LVGL Puffergrößen
 #define SCREEN_WIDTH  800
@@ -73,10 +93,17 @@ struct SystemState {
   uint32_t customDays;    // Für individuelles Programm
   bool tankLevelOk;       // Tankfüllstand OK?
   bool motorActive;       // Motor läuft?
+  bool remoteControlEnabled; // Fernsteuerung aktiviert?
+  String deviceId;        // Eindeutige Geräte-ID
 };
 
 SystemState systemState;
 ESP32Time rtc;
+
+// Kommunikationsmodule
+WiFiManager wifiManager;
+MQTTCommunication mqttClient;
+RESTAPI restApi;
 
 // Display-Treiber und LVGL-Puffer
 TFT_eSPI tft = TFT_eSPI();
@@ -153,9 +180,157 @@ void IRAM_ATTR onProgramTimer() {
   }
 }
 
+// MQTT-Callback-Funktion für Fernsteuerungsbefehle
+void onMqttCommand(const String &command, const JsonObject &payload) {
+  Serial.print("MQTT-Befehl empfangen: ");
+  Serial.println(command);
+  
+  if (command == "start_program") {
+    if (payload.containsKey("program")) {
+      int programIndex = payload["program"].as<int>();
+      startProgram(programIndex);
+      
+      // Bestätigung senden
+      DynamicJsonDocument response(128);
+      response["success"] = true;
+      response["program"] = programIndex;
+      mqttClient.publishStatus("program_started");
+    }
+  }
+  else if (command == "stop_program") {
+    stopProgram();
+    
+    // Bestätigung senden
+    DynamicJsonDocument response(128);
+    response["success"] = true;
+    mqttClient.publishStatus("program_stopped");
+  }
+  else if (command == "get_status") {
+    // Detaillierten Status senden
+    DynamicJsonDocument statusDoc(256);
+    statusDoc["state"] = (int)systemState.state;
+    statusDoc["program"] = systemState.activeProgram;
+    statusDoc["remaining_time"] = getRemainingTime();
+    statusDoc["progress"] = getProgressPercent();
+    statusDoc["tank_level_ok"] = systemState.tankLevelOk;
+    
+    mqttClient.publishDetailedStatus("status_update", statusDoc.as<JsonObject>());
+  }
+}
+
+// Initialisiert die WiFi-Verbindung
+void initWiFi() {
+  Serial.println("Initialisiere WiFi-Verbindung...");
+  
+  // Geräte-ID aus MAC-Adresse erstellen
+  systemState.deviceId = "desinfektion_" + String((uint32_t)(ESP.getEfuseMac() >> 32), HEX);
+  Serial.print("Geräte-ID: ");
+  Serial.println(systemState.deviceId);
+  
+  // WiFi-Manager initialisieren
+  wifiManager.setConnectionCallback([](bool connected) {
+    if (connected) {
+      Serial.println("WiFi verbunden!");
+      
+      // MQTT starten, wenn WiFi verbunden ist
+      mqttClient.begin();
+      
+      // REST API starten
+      setupRestApi();
+    } else {
+      Serial.println("WiFi-Verbindung verloren!");
+    }
+  });
+  
+  wifiManager.begin();
+}
+
+// Initialisiert die REST API
+void setupRestApi() {
+  Serial.println("Initialisiere REST API...");
+  
+  // API-Endpunkte registrieren
+  
+  // Status-Endpunkt
+  restApi.registerEndpoint("/api/status", "GET", [](WebServer &server, JsonDocument &doc) {
+    DynamicJsonDocument response(256);
+    response["state"] = (int)systemState.state;
+    response["program"] = systemState.activeProgram;
+    response["remaining_time"] = getRemainingTime();
+    response["progress"] = getProgressPercent();
+    response["tank_level_ok"] = systemState.tankLevelOk;
+    response["device_id"] = systemState.deviceId;
+    
+    String responseStr;
+    serializeJson(response, responseStr);
+    server.send(200, "application/json", responseStr);
+  });
+  
+  // Programm-Start-Endpunkt
+  restApi.registerEndpoint("/api/program/start", "POST", [](WebServer &server, JsonDocument &doc) {
+    if (doc.containsKey("program")) {
+      int programIndex = doc["program"].as<int>();
+      
+      if (programIndex >= 1 && programIndex <= 4) {
+        startProgram(programIndex);
+        
+        DynamicJsonDocument response(128);
+        response["success"] = true;
+        response["program"] = programIndex;
+        
+        String responseStr;
+        serializeJson(response, responseStr);
+        server.send(200, "application/json", responseStr);
+      } else {
+        server.send(400, "application/json", "{\"error\":\"Ungültiger Programmindex\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Programmindex fehlt\"}");
+    }
+  });
+  
+  // Programm-Stop-Endpunkt
+  restApi.registerEndpoint("/api/program/stop", "POST", [](WebServer &server, JsonDocument &doc) {
+    stopProgram();
+    
+    DynamicJsonDocument response(128);
+    response["success"] = true;
+    
+    String responseStr;
+    serializeJson(response, responseStr);
+    server.send(200, "application/json", responseStr);
+  });
+  
+  // Individuelle-Programmdauer-Endpunkt
+  restApi.registerEndpoint("/api/program/custom_days", "POST", [](WebServer &server, JsonDocument &doc) {
+    if (doc.containsKey("days")) {
+      int days = doc["days"].as<int>();
+      
+      if (days >= 1 && days <= 99) {
+        systemState.customDays = days;
+        
+        DynamicJsonDocument response(128);
+        response["success"] = true;
+        response["days"] = days;
+        
+        String responseStr;
+        serializeJson(response, responseStr);
+        server.send(200, "application/json", responseStr);
+      } else {
+        server.send(400, "application/json", "{\"error\":\"Ungültige Anzahl an Tagen\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Tagesanzahl fehlt\"}");
+    }
+  });
+  
+  // API starten
+  restApi.begin();
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("Desinfektionseinheit mit LVGL startet...");
+  Serial.println("Desinfektionseinheit mit LVGL und Remote-Steuerung startet...");
 
   // GPIO-Setup
   pinMode(RED_PIN, OUTPUT);
@@ -177,6 +352,7 @@ void setup() {
   systemState.customDays = 7;     // Standardwert für individuelles Programm
   systemState.tankLevelOk = true;
   systemState.motorActive = false;
+  systemState.remoteControlEnabled = true; // Remote-Steuerung standardmäßig aktiviert
 
   // LVGL initialisieren
   lv_init();
@@ -217,6 +393,12 @@ void setup() {
   timerAlarmWrite(programTimer, 1000000, true); // 1 Sekunde
   timerAlarmEnable(programTimer);
 
+  // MQTT-Callback für Fernsteuerungsbefehle registrieren
+  mqttClient.setCommandCallback(onMqttCommand);
+
+  // WiFi und Remote-Steuerung initialisieren
+  initWiFi();
+
   // GUI erstellen
   createMainScreen();
   createProgramScreen();
@@ -247,6 +429,31 @@ void loop() {
     if (millis() - lastStatusUpdate > 1000) {
       lastStatusUpdate = millis();
       updateRunningScreen();
+    }
+  }
+  
+  // WiFi und Remote-Kommunikation verwalten
+  wifiManager.loop();
+  
+  if (wifiManager.isConnected()) {
+    mqttClient.loop();
+    restApi.loop();
+    
+    // Telemetriedaten periodisch senden, wenn verbunden
+    static uint32_t lastTelemetryUpdate = 0;
+    if (millis() - lastTelemetryUpdate > 60000) { // Alle 60 Sekunden
+      lastTelemetryUpdate = millis();
+      
+      // Telemetriedaten sammeln und senden
+      DynamicJsonDocument telemetryDoc(256);
+      telemetryDoc["state"] = (int)systemState.state;
+      telemetryDoc["program"] = systemState.activeProgram;
+      telemetryDoc["remaining_time"] = getRemainingTime();
+      telemetryDoc["progress"] = getProgressPercent();
+      telemetryDoc["tank_level_ok"] = systemState.tankLevelOk;
+      telemetryDoc["uptime"] = millis() / 1000;
+      
+      mqttClient.publishTelemetry(telemetryDoc.as<JsonObject>());
     }
   }
   
@@ -446,11 +653,11 @@ void createSettingsScreen() {
   lv_obj_t *dateTimeLabel = lv_label_create(settingsScreen);
   lv_label_set_text(dateTimeLabel, "Datum und Uhrzeit");
   lv_obj_set_style_text_color(dateTimeLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_align(dateTimeLabel, LV_ALIGN_TOP_MID, 0, 160);
+  lv_obj_align(dateTimeLabel, LV_ALIGN_TOP_MID, -180, 160);
   
   lv_obj_t *dateTimeBtn = lv_btn_create(settingsScreen);
   lv_obj_set_size(dateTimeBtn, 250, 60);
-  lv_obj_align(dateTimeBtn, LV_ALIGN_TOP_MID, 0, 200);
+  lv_obj_align(dateTimeBtn, LV_ALIGN_TOP_MID, -180, 200);
   
   lv_obj_t *dateTimeBtnLabel = lv_label_create(dateTimeBtn);
   lv_label_set_text(dateTimeBtnLabel, "Datum/Uhrzeit einstellen");
@@ -460,15 +667,65 @@ void createSettingsScreen() {
   lv_obj_t *tankCalibLabel = lv_label_create(settingsScreen);
   lv_label_set_text(tankCalibLabel, "Tank-Sensor kalibrieren");
   lv_obj_set_style_text_color(tankCalibLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_align(tankCalibLabel, LV_ALIGN_TOP_MID, 0, 280);
+  lv_obj_align(tankCalibLabel, LV_ALIGN_TOP_MID, 180, 160);
   
   lv_obj_t *tankCalibBtn = lv_btn_create(settingsScreen);
   lv_obj_set_size(tankCalibBtn, 250, 60);
-  lv_obj_align(tankCalibBtn, LV_ALIGN_TOP_MID, 0, 320);
+  lv_obj_align(tankCalibBtn, LV_ALIGN_TOP_MID, 180, 200);
   
   lv_obj_t *tankCalibBtnLabel = lv_label_create(tankCalibBtn);
   lv_label_set_text(tankCalibBtnLabel, "Kalibrieren");
   lv_obj_center(tankCalibBtnLabel);
+  
+  // WiFi-Einstellungen
+  lv_obj_t *wifiLabel = lv_label_create(settingsScreen);
+  lv_label_set_text(wifiLabel, "WLAN-Verbindung");
+  lv_obj_set_style_text_color(wifiLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(wifiLabel, LV_ALIGN_TOP_MID, -180, 280);
+  
+  lv_obj_t *wifiBtn = lv_btn_create(settingsScreen);
+  lv_obj_set_size(wifiBtn, 250, 60);
+  lv_obj_align(wifiBtn, LV_ALIGN_TOP_MID, -180, 320);
+  lv_obj_add_event_cb(wifiBtn, [](lv_event_t *e) {
+    // WLAN zurücksetzen und Access Point starten
+    wifiManager.reset();
+    lv_label_set_text(statusLabel, "WLAN-Konfiguration gestartet");
+  }, LV_EVENT_CLICKED, NULL);
+  
+  lv_obj_t *wifiBtnLabel = lv_label_create(wifiBtn);
+  lv_label_set_text(wifiBtnLabel, "WLAN konfigurieren");
+  lv_obj_center(wifiBtnLabel);
+  
+  // Remote-Steuerung aktivieren/deaktivieren
+  lv_obj_t *remoteLabel = lv_label_create(settingsScreen);
+  lv_label_set_text(remoteLabel, "Fernsteuerung");
+  lv_obj_set_style_text_color(remoteLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(remoteLabel, LV_ALIGN_TOP_MID, 180, 280);
+  
+  static lv_obj_t *remoteSwitch = lv_switch_create(settingsScreen);
+  lv_obj_align(remoteSwitch, LV_ALIGN_TOP_MID, 180, 320);
+  if (systemState.remoteControlEnabled) {
+    lv_obj_add_state(remoteSwitch, LV_STATE_CHECKED);
+  }
+  lv_obj_add_event_cb(remoteSwitch, [](lv_event_t *e) {
+    systemState.remoteControlEnabled = lv_obj_has_state(remoteSwitch, LV_STATE_CHECKED);
+    if (systemState.remoteControlEnabled) {
+      lv_label_set_text(statusLabel, "Fernsteuerung aktiviert");
+    } else {
+      lv_label_set_text(statusLabel, "Fernsteuerung deaktiviert");
+    }
+  }, LV_EVENT_VALUE_CHANGED, NULL);
+  
+  // Geräte-ID anzeigen
+  lv_obj_t *deviceIdLabel = lv_label_create(settingsScreen);
+  lv_label_set_text(deviceIdLabel, "Geräte-ID:");
+  lv_obj_set_style_text_color(deviceIdLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(deviceIdLabel, LV_ALIGN_BOTTOM_MID, 0, -80);
+  
+  lv_obj_t *deviceIdValue = lv_label_create(settingsScreen);
+  lv_label_set_text(deviceIdValue, systemState.deviceId.c_str());
+  lv_obj_set_style_text_color(deviceIdValue, lv_color_hex(0x00FFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(deviceIdValue, LV_ALIGN_BOTTOM_MID, 0, -60);
   
   // Zurück Button
   lv_obj_t *backBtn = lv_btn_create(settingsScreen);
