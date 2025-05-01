@@ -117,8 +117,12 @@ class LVGLRenderer:
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        self.bg_color = (0, 51, 102)  # Dunkelblau für den Hintergrund
+        self.bg_color = (33, 33, 33)  # Dunkler Hintergrund (fast schwarz)
         self.text_color = (255, 255, 255)  # Weiß für Text
+        self.accent_color = (0, 150, 136)  # Türkis als Akzentfarbe
+        self.secondary_color = (96, 125, 139)  # Blaugrau als sekundäre Farbe
+        self.error_color = (244, 67, 54)  # Rot für Fehler
+        self.success_color = (76, 175, 80)  # Grün für Erfolg
         
         # Schriftarten laden
         try:
@@ -155,17 +159,45 @@ class LVGLRenderer:
             image.save(buf, format="PNG")
             return base64.b64encode(buf.getvalue()).decode("utf-8")
     
-    def draw_button(self, draw, x, y, width, height, text, color=(76, 175, 80)):
+    def draw_button(self, draw, x, y, width, height, text, color=None):
         # Zeichnet einen Button mit Text
-        draw.rectangle([(x, y), (x + width, y + height)], fill=color)
+        if color is None:
+            color = self.accent_color
+
+        # Hintergrund mit abgerundeten Ecken simulieren
+        draw.rectangle([(x, y), (x + width, y + height)], fill=color, outline=color)
+        
+        # Leichten Schatten hinzufügen
+        draw.rectangle([(x, y + height - 3), (x + width, y + height)], fill=(0, 0, 0, 50))
+        
+        # Text mit leichtem Schatten
+        draw.text((x + width//2, y + height//2 + 1), text, fill=(0, 0, 0, 100), font=self.medium_font, anchor="mm")
         draw.text((x + width//2, y + height//2), text, fill=(255, 255, 255), font=self.medium_font, anchor="mm")
     
     def draw_progress_bar(self, draw, x, y, width, height, percent):
-        # Zeichnet einen Fortschrittsbalken
-        draw.rectangle([(x, y), (x + width, y + height)], outline=(255, 255, 255))
-        progress_width = int((width - 2) * percent / 100)
+        # Zeichnet einen Fortschrittsbalken im dunklen Design
+        
+        # Hintergrund (dunkelgrau)
+        background_color = (60, 60, 60)
+        draw.rectangle([(x, y), (x + width, y + height)], fill=background_color, outline=(100, 100, 100))
+        
+        # Fortschrittsbalken
+        progress_width = int((width - 4) * percent / 100)
         if progress_width > 0:
-            draw.rectangle([(x + 1, y + 1), (x + 1 + progress_width, y + height - 1)], fill=(76, 175, 80))
+            # Verlauf simulieren
+            for i in range(progress_width):
+                pos = i / progress_width  # 0.0 bis 1.0
+                # Farbverlauf von Akzentfarbe zu hellerem Ton
+                r = int(self.accent_color[0] + (255 - self.accent_color[0]) * pos * 0.3)
+                g = int(self.accent_color[1] + (255 - self.accent_color[1]) * pos * 0.3)
+                b = int(self.accent_color[2] + (255 - self.accent_color[2]) * pos * 0.3)
+                
+                # Begrenze Farbwerte auf 0-255
+                r = max(0, min(255, r))
+                g = max(0, min(255, g))
+                b = max(0, min(255, b))
+                
+                draw.line([(x + 2 + i, y + 2), (x + 2 + i, y + height - 2)], fill=(r, g, b))
     
     def render_main_screen(self):
         # Hauptbildschirm rendern
@@ -308,64 +340,120 @@ class LVGLRenderer:
         return image
     
     def render_completed_screen(self):
-        # Abgeschlossenes Programm-Bildschirm rendern
+        # Abgeschlossenes Programm-Bildschirm rendern (dunkles Design)
         image, draw = self.create_image()
-        image = Image.new("RGB", (self.width, self.height), (0, 102, 0))  # Grüner Hintergrund
+        
+        # Zeichne einen verdunkelten Hintergrund mit Farbverlauf
+        bg_gradient = Image.new("RGB", (self.width, self.height), self.bg_color)
+        for y in range(self.height):
+            # Subtiler Farbverlauf vom oberen zum unteren Rand
+            factor = y / self.height
+            r = int(self.success_color[0] * factor * 0.3)
+            g = int(self.success_color[1] * factor * 0.3)
+            b = int(self.success_color[2] * factor * 0.3)
+            for x in range(self.width):
+                bg_gradient.putpixel((x, y), (
+                    min(255, self.bg_color[0] + r),
+                    min(255, self.bg_color[1] + g),
+                    min(255, self.bg_color[2] + b)
+                ))
+        
+        image = bg_gradient
         draw = ImageDraw.Draw(image)
         
-        # Titel
+        # Titel mit Hervorhebung
+        draw.text((self.width//2, 32), "Programm abgeschlossen", 
+                 fill=(0, 0, 0, 100), font=self.large_font, anchor="mm")  # Schattierung
         draw.text((self.width//2, 30), "Programm abgeschlossen", 
-                 fill=self.text_color, font=self.large_font, anchor="mm")
+                 fill=self.success_color, font=self.large_font, anchor="mm")
         
-        # Erfolgssymbol (Häkchen simulieren)
-        draw.ellipse([(self.width//2 - 50, self.height//2 - 50), 
-                     (self.width//2 + 50, self.height//2 + 50)], outline=(255, 255, 255), width=3)
-        draw.line([(self.width//2 - 30, self.height//2), (self.width//2 - 10, self.height//2 + 20)], 
-                 fill=(255, 255, 255), width=6)
-        draw.line([(self.width//2 - 10, self.height//2 + 20), (self.width//2 + 30, self.height//2 - 20)], 
-                 fill=(255, 255, 255), width=6)
+        # Dekorative Linie unter dem Titel
+        draw.line([(self.width//4, 60), (self.width*3//4, 60)], fill=self.success_color, width=2)
         
-        # Erfolgsmeldung
-        draw.text((self.width//2, self.height//2 + 80), "Desinfektion erfolgreich abgeschlossen!", 
+        # Erfolgssymbol (Modernes Häkchen in einem Kreis)
+        circle_radius = 60
+        draw.ellipse([(self.width//2 - circle_radius, self.height//2 - circle_radius), 
+                     (self.width//2 + circle_radius, self.height//2 + circle_radius)], 
+                    outline=self.success_color, width=3)
+        
+        # Häkchen-Symbol (etwas moderner gestaltet)
+        check_points = [
+            (self.width//2 - 30, self.height//2),
+            (self.width//2 - 10, self.height//2 + 30),
+            (self.width//2 + 40, self.height//2 - 25)
+        ]
+        draw.line(check_points, fill=self.success_color, width=8)
+        
+        # Erfolgsmeldung mit Stil
+        message = "Desinfektion erfolgreich abgeschlossen!"
+        draw.text((self.width//2, self.height//2 + 120), message, 
+                 fill=(0, 0, 0, 100), font=self.medium_font, anchor="mm")  # Schattierung
+        draw.text((self.width//2, self.height//2 + 118), message, 
                  fill=self.text_color, font=self.medium_font, anchor="mm")
         
-        # Hauptmenü-Button
-        self.draw_button(draw, self.width//2 - 150, self.height - 80, 300, 60, "Zum Hauptmenü")
+        # Hauptmenü-Button mit moderner Gestaltung
+        self.draw_button(draw, self.width//2 - 150, self.height - 80, 300, 60, "Zum Hauptmenü", self.success_color)
         
         return image
     
     def render_error_screen(self):
-        # Fehlerbildschirm rendern
+        # Fehlerbildschirm rendern (dunkles Design)
         image, draw = self.create_image()
-        image = Image.new("RGB", (self.width, self.height), (153, 0, 0))  # Roter Hintergrund
+        
+        # Zeichne einen verdunkelten Hintergrund mit Farbverlauf
+        bg_gradient = Image.new("RGB", (self.width, self.height), self.bg_color)
+        for y in range(self.height):
+            # Subtiler Farbverlauf vom oberen zum unteren Rand
+            factor = y / self.height
+            r = int(self.error_color[0] * factor * 0.15)
+            g = int(self.error_color[1] * factor * 0.05)
+            b = int(self.error_color[2] * factor * 0.05)
+            for x in range(self.width):
+                bg_gradient.putpixel((x, y), (
+                    min(255, self.bg_color[0] + r),
+                    min(255, self.bg_color[1] + g),
+                    min(255, self.bg_color[2] + b)
+                ))
+        
+        image = bg_gradient
         draw = ImageDraw.Draw(image)
         
-        # Titel
+        # Titel mit Hervorhebung
+        draw.text((self.width//2, 32), "Fehler", 
+                 fill=(0, 0, 0, 100), font=self.large_font, anchor="mm")  # Schattierung
         draw.text((self.width//2, 30), "Fehler", 
-                 fill=self.text_color, font=self.large_font, anchor="mm")
+                 fill=self.error_color, font=self.large_font, anchor="mm")
         
-        # Warnsymbol (Ausrufezeichen)
-        draw.polygon([(self.width//2, self.height//2 - 60), 
-                     (self.width//2 - 40, self.height//2 + 20), 
-                     (self.width//2 + 40, self.height//2 + 20)], 
-                    outline=(255, 255, 0), fill=(255, 255, 0))
-        draw.rectangle([(self.width//2 - 5, self.height//2 - 40), 
-                       (self.width//2 + 5, self.height//2 - 10)], 
-                      fill=(0, 0, 0))
-        draw.rectangle([(self.width//2 - 5, self.height//2), 
-                       (self.width//2 + 5, self.height//2 + 10)], 
-                      fill=(0, 0, 0))
+        # Dekorative Linie unter dem Titel
+        draw.line([(self.width//4, 60), (self.width*3//4, 60)], fill=self.error_color, width=2)
         
-        # Fehlermeldung
-        draw.text((self.width//2, self.height//2 + 60), "Tankfüllstand zu niedrig!", 
-                 fill=self.text_color, font=self.medium_font, anchor="mm")
+        # Warnsymbol (Moderner Kreis mit Ausrufezeichen)
+        circle_radius = 60
+        draw.ellipse([(self.width//2 - circle_radius, self.height//2 - circle_radius), 
+                     (self.width//2 + circle_radius, self.height//2 + circle_radius)], 
+                    outline=self.error_color, width=3)
+        
+        # Ausrufezeichen
+        draw.line([(self.width//2, self.height//2 - 30), (self.width//2, self.height//2 + 10)], 
+                 fill=self.error_color, width=8)
+        draw.ellipse([(self.width//2 - 4, self.height//2 + 20), 
+                     (self.width//2 + 4, self.height//2 + 28)], 
+                    fill=self.error_color)
+        
+        # Fehlermeldung mit Stil
+        error_msg = "Tankfüllstand zu niedrig!"
+        draw.text((self.width//2, self.height//2 + 120), error_msg, 
+                 fill=(0, 0, 0, 100), font=self.medium_font, anchor="mm")  # Schattierung
+        draw.text((self.width//2, self.height//2 + 118), error_msg, 
+                 fill=self.error_color, font=self.medium_font, anchor="mm")
         
         # Anweisungen
-        draw.text((self.width//2, self.height//2 + 100), "Bitte Tank auffüllen und neu starten.", 
+        instructions = "Bitte Tank auffüllen und neu starten."
+        draw.text((self.width//2, self.height//2 + 155), instructions, 
                  fill=self.text_color, font=self.small_font, anchor="mm")
         
-        # OK-Button
-        self.draw_button(draw, self.width//2 - 100, self.height - 80, 200, 60, "OK")
+        # OK-Button mit moderner Gestaltung
+        self.draw_button(draw, self.width//2 - 100, self.height - 80, 200, 60, "OK", self.error_color)
         
         return image
 
