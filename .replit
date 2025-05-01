@@ -2,7 +2,7 @@ modules = ["arduino", "python-3.11"]
 
 [nix]
 channel = "stable-24_05"
-packages = ["arduino-cli"]
+packages = ["arduino-cli", "freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
 
 [workflows]
 runButton = "Project"
@@ -22,7 +22,7 @@ args = "arduino_workflow"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "ESP8266 Simulator"
+args = "LVGL Simulator"
 
 [[workflows.workflow]]
 name = "Arduino Simulation"
@@ -42,12 +42,12 @@ task = "shell.exec"
 args = "arduino-cli compile --fqbn esp8266:esp8266:d1_mini desinfection_control.ino"
 
 [[workflows.workflow]]
-name = "ESP8266 Simulator"
+name = "LVGL Simulator"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python esp8266_simulator.py"
+args = "python lvgl_simulator.py"
 waitForPort = 5000
 
 [deployment]
