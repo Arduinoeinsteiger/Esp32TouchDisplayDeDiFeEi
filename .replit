@@ -1,4 +1,4 @@
-modules = ["arduino"]
+modules = ["arduino", "python-3.11"]
 
 [nix]
 channel = "stable-24_05"
@@ -20,6 +20,10 @@ args = "Arduino Simulation"
 task = "workflow.run"
 args = "arduino_workflow"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "ESP8266 Simulator"
+
 [[workflows.workflow]]
 name = "Arduino Simulation"
 author = "agent"
@@ -37,5 +41,18 @@ author = "agent"
 task = "shell.exec"
 args = "arduino-cli compile --fqbn esp8266:esp8266:d1_mini desinfection_control.ino"
 
+[[workflows.workflow]]
+name = "ESP8266 Simulator"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python esp8266_simulator.py"
+waitForPort = 5000
+
 [deployment]
 run = ["sh", "-c", "apt-get update && apt-get install -y arduino-cli && arduino-cli core install esp8266:esp8266 && arduino-cli lib install \"Adafruit SSD1306\" \"Adafruit GFX Library\" \"TimeLib\" && arduino-cli compile --fqbn esp8266:esp8266:d1_mini . && echo \"Simulation started on port 5000...\" && python -m http.server 5000"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
