@@ -1,6 +1,6 @@
 # SwissAirDry Desinfektionseinheit
 
-Embedded-Steuerungssystem für eine Desinfektionseinheit mit mehreren Programmen, LED-Statusanzeige und OLED-Display-Menü.
+Embedded-Steuerungssystem für eine Desinfektionseinheit mit mehreren Programmen, LED-Statusanzeige und Touch-LCD-Interface.
 
 ![Hauptbildschirm](generated-icon.png)
 
@@ -46,3 +46,54 @@ Arduino IDE:
 3. Sketch hochladen
 
 ![Erfolgsmeldung](attached_assets/S8f152c0235a345998b7c792cc6863d95q.avif)
+
+## Fehlerbehebung
+
+### Voraussetzungen
+- LVGL (Light and Versatile Graphics Library)
+- TFT_eSPI
+- ESP32Time
+- PubSubClient
+- ArduinoJson
+- WebServer
+- ESPmDNS
+
+### Häufige Probleme und Lösungen
+
+#### TFT_eSPI Konfiguration
+Stelle sicher, dass die Datei `User_Setup.h` korrekt konfiguriert ist:
+```cpp
+#define ILI9488_DRIVER
+
+#define TFT_WIDTH  480
+#define TFT_HEIGHT 800
+
+// ESP32-S3 pins für Display
+#define TFT_MOSI 11
+#define TFT_SCLK 12
+#define TFT_CS   10
+#define TFT_DC   13
+#define TFT_RST  14
+
+// Touch-Controller Pin
+#define TOUCH_CS 15
+```
+
+#### Board-Einstellungen
+- Board: "ESP32S3 Dev Module"
+- Flash Mode: "QIO"
+- Flash Size: "16MB"
+- Partition Scheme: "Huge APP"
+- PSRAM: "Enabled"
+
+#### Speicherprobleme
+Bei "out of memory" Fehlern:
+1. Reduziere LVGL-Puffergrößen
+2. Deaktiviere nicht benötigte LVGL-Features
+3. Verwende PSRAM, falls verfügbar
+
+#### Debug-Tipps
+Aktiviere Debug-Ausgaben:
+```cpp
+#define CORE_DEBUG_LEVEL 3
+```

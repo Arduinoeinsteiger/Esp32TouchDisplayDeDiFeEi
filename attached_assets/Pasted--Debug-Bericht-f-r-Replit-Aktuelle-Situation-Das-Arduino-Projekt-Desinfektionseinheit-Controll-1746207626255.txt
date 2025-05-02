@@ -1,0 +1,85 @@
+# Debug-Bericht für Replit
+
+## Aktuelle Situation
+Das Arduino-Projekt "Desinfektionseinheit Controller" kann nicht kompiliert werden. Hier sind die notwendigen Schritte zur Fehlerbehebung:
+
+## 1. Bibliotheken überprüfen
+Replit, bitte überprüfe, ob folgende Bibliotheken installiert sind:
+- LVGL (Light and Versatile Graphics Library)
+- TFT_eSPI
+- ESP32Time
+- PubSubClient
+- ArduinoJson
+- WebServer
+- ESPmDNS
+
+Führe diese Befehle aus:
+```bash
+# LVGL installieren
+git clone https://github.com/lvgl/lvgl.git
+
+# TFT_eSPI installieren
+git clone https://github.com/Bodmer/TFT_eSPI.git
+
+# PubSubClient installieren
+git clone https://github.com/knolleary/pubsubclient.git
+```
+
+## 2. Konfigurationsdateien überprüfen
+1. Überprüfe, ob `lv_conf.h` im richtigen Verzeichnis liegt
+2. Stelle sicher, dass die TFT_eSPI-Konfiguration korrekt ist
+3. Überprüfe die Pin-Konfigurationen für dein Board
+
+## 3. Kompilierungsfehler analysieren
+Wenn du einen Kompilierungsfehler erhältst:
+1. Kopiere die vollständige Fehlermeldung
+2. Überprüfe die Zeilennummern in der Fehlermeldung
+3. Stelle sicher, dass alle erforderlichen Header-Dateien vorhanden sind
+
+## 4. Spezifische Fehlerbehebung
+### Falls "jump to case label" Fehler auftritt:
+- Überprüfe alle `switch`-Anweisungen
+- Stelle sicher, dass keine Variablen innerhalb von `case`-Blöcken deklariert werden
+- Verschiebe alle Variablendeklarationen vor die `switch`-Anweisung
+
+### Falls "missing header file" Fehler auftritt:
+- Überprüfe die Include-Pfade
+- Stelle sicher, dass alle Header-Dateien im richtigen Verzeichnis liegen
+- Überprüfe die Groß-/Kleinschreibung der Dateinamen
+
+### Falls "undefined reference" Fehler auftritt:
+- Überprüfe, ob alle Funktionen implementiert sind
+- Stelle sicher, dass alle Bibliotheken korrekt verlinkt sind
+- Überprüfe die Funktionsprototypen
+
+## 5. Board-Konfiguration
+1. Wähle das richtige Board (ESP32-S3)
+2. Überprüfe die Upload-Geschwindigkeit
+3. Stelle sicher, dass der richtige Port ausgewählt ist
+
+## 6. Speichermanagement
+1. Überprüfe die Puffergrößen
+2. Reduziere die LVGL-Puffergröße bei Bedarf
+3. Optimiere die Speichernutzung
+
+## 7. Debugging-Tipps
+1. Aktiviere serielle Debug-Ausgaben
+2. Füge temporäre Debug-Prints hinzu
+3. Überprüfe die Ausgaben im seriellen Monitor
+
+## 8. Nächste Schritte
+1. Führe eine saubere Kompilierung durch
+2. Überprüfe die Ausgabe auf Warnungen
+3. Teste die grundlegende Funktionalität
+
+## Wichtige Hinweise
+- Stelle sicher, dass alle Pfade korrekt sind
+- Überprüfe die Berechtigungen
+- Halte die Bibliotheken aktuell
+- Dokumentiere alle Änderungen
+
+## Kontakt
+Bei weiteren Problemen:
+1. Dokumentiere den genauen Fehler
+2. Notiere die verwendeten Bibliotheksversionen
+3. Beschreibe die durchgeführten Schritte
